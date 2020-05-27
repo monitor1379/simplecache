@@ -4,10 +4,11 @@ package simplecache
  * @Author: ZhenpengDeng(monitor1379)
  * @Date: 2020-05-27 13:56:36
  * @Last Modified by: ZhenpengDeng(monitor1379)
- * @Last Modified time: 2020-05-27 15:26:51
+ * @Last Modified time: 2020-05-27 15:50:46
  */
 
 import (
+	"fmt"
 	"sync"
 	"time"
 )
@@ -44,18 +45,42 @@ func NewMemCacheWithOptions(options Options) Cache {
 	mc := new(MemCache)
 	mc.options = options
 	mc.table = make(map[string]*Entry)
+	mc.expiredTable = make(map[string]*Entry)
 
 	// 后台协程主动定期清理过期key
-	go mc.cleanupExpiredKeys()
+	go mc.backgroundCleanupExpiredKeys()
 	return mc
 }
 
-func (mc *MemCache) cleanupExpiredKeys() {
+func (mc *MemCache) backgroundCleanupExpiredKeys() {
 	ticker := time.NewTicker(mc.options.IntervalOfProactivelyDeleteExpiredKey)
 	for {
 		select {
 		case <-ticker.C:
-			// TODO(monitor1379): clean up
+			fmt.Println("开始删除")
+			mc.expiredMu.Lock()
+			mc.doCleanupExpiredKeysImmediately()
+			mc.expiredMu.Unlock()
+		}
+	}
+}
+
+func (mc *MemCache) doCleanupExpiredKeysImmediately() {
+	fmt.Println("fuck")
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+
+	mc.expiredMu.Lock()
+	defer mc.expiredMu.Unlock()
+
+	// map的delete在遍历时是安全的
+	// 将过期的key从MemCache.table以及MemCache.expiredTable中删除
+	for key := range mc.expiredTable {
+		entry := mc.expiredTable[key]
+		if entry.expiredNano < time.Now().UnixNano() {
+			fmt.Println("后台删除:", key)
+			delete(mc.table, key)
+			delete(mc.expiredTable, key)
 		}
 	}
 
@@ -70,7 +95,7 @@ func (mc *MemCache) Set(key string, value interface{}, expire time.Duration) {
 	defer mc.mu.Unlock()
 
 	// 计算该key的过期时间
-	expiredNano = time.Now().UnixNano() + expire.Nanoseconds()
+	expiredNano := time.Now().UnixNano() + expire.Nanoseconds()
 
 	entry := &Entry{
 		value:       value,
@@ -82,6 +107,7 @@ func (mc *MemCache) Set(key string, value interface{}, expire time.Duration) {
 	if expire > 0 {
 		mc.expiredMu.Lock()
 		defer mc.expiredMu.Unlock()
+
 		mc.expiredTable[key] = entry
 	}
 
@@ -97,8 +123,15 @@ func (mc *MemCache) Get(key string) (interface{}, bool) {
 		return nil, false
 	}
 
-	if entry.expired < time.Now().UnixNano() {
-		// TODO(monitor1379): lazy delete
+	fmt.Println("fuck get")
+	// 在Get操作中lazy删除
+	if entry.expiredNano < time.Now().UnixNano() {
+		mc.expiredMu.Lock()
+		defer mc.expiredMu.Unlock()
+
+		delete(mc.table, key)
+		delete(mc.expiredTable, key)
+
 		return nil, false
 	}
 
