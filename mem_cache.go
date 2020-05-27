@@ -4,13 +4,15 @@ package simplecache
  * @Author: ZhenpengDeng(monitor1379)
  * @Date: 2020-05-27 13:56:36
  * @Last Modified by: ZhenpengDeng(monitor1379)
- * @Last Modified time: 2020-05-27 15:50:46
+ * @Last Modified time: 2020-05-27 17:29:10
  */
 
 import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/monitor1379/simplecache/utils"
 )
 
 type Entry struct {
@@ -22,8 +24,8 @@ type MemCache struct {
 	options Options
 
 	// 单位: bytes
-	maxMemory   uint64
-	memoryUsage uint64
+	maxMemory   int64
+	memoryUsage int64
 
 	// 存储所有key-entry pair
 	mu    sync.RWMutex
@@ -32,9 +34,6 @@ type MemCache struct {
 	// 存储所有设置了expire的key-entry pair，用于主动定期清理，所以用普通锁而不是读写锁
 	expiredMu    sync.Mutex
 	expiredTable map[string]*Entry
-
-	// 其他
-	keyNums int64
 }
 
 func NewMemCache() Cache {
@@ -49,24 +48,23 @@ func NewMemCacheWithOptions(options Options) Cache {
 
 	// 后台协程主动定期清理过期key
 	go mc.backgroundCleanupExpiredKeys()
+
 	return mc
 }
 
 func (mc *MemCache) backgroundCleanupExpiredKeys() {
+	// 每隔一段时间，扫描数据库中expiredTable中key，判断是否过期并清理掉
+	// 在扫描的过程中，数据库会发生阻塞
 	ticker := time.NewTicker(mc.options.IntervalOfProactivelyDeleteExpiredKey)
 	for {
 		select {
 		case <-ticker.C:
-			fmt.Println("开始删除")
-			mc.expiredMu.Lock()
 			mc.doCleanupExpiredKeysImmediately()
-			mc.expiredMu.Unlock()
 		}
 	}
 }
 
 func (mc *MemCache) doCleanupExpiredKeysImmediately() {
-	fmt.Println("fuck")
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
 
@@ -78,7 +76,6 @@ func (mc *MemCache) doCleanupExpiredKeysImmediately() {
 	for key := range mc.expiredTable {
 		entry := mc.expiredTable[key]
 		if entry.expiredNano < time.Now().UnixNano() {
-			fmt.Println("后台删除:", key)
 			delete(mc.table, key)
 			delete(mc.expiredTable, key)
 		}
@@ -87,7 +84,30 @@ func (mc *MemCache) doCleanupExpiredKeysImmediately() {
 }
 
 func (mc *MemCache) SetMaxMemory(size string) bool {
-	return false
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+
+	// TODO(monitor1379): 该函数返回的bool的true/false表示什么意思
+	maxMemory, err := utils.ParseSizeString(size)
+	if err != nil {
+		fmt.Println("[WARNING] simplecache/mem_cache.go#93: parse size string faild:", err)
+		return false
+	}
+
+	sysTotalMemory, err := utils.GetSystemTotalMemory()
+	if err != nil {
+		fmt.Println("[WARNING] simplecache/mem_cache.go#99: get system total memory faild:", err)
+		return false
+	}
+
+	if maxMemory > sysTotalMemory {
+		fmt.Println("[WARNING] simplecache/mem_cache.go#104: using system max memory as max memory size")
+		maxMemory = sysTotalMemory
+		return false
+	}
+
+	mc.maxMemory = maxMemory
+	return true
 }
 
 func (mc *MemCache) Set(key string, value interface{}, expire time.Duration) {
@@ -123,7 +143,6 @@ func (mc *MemCache) Get(key string) (interface{}, bool) {
 		return nil, false
 	}
 
-	fmt.Println("fuck get")
 	// 在Get操作中lazy删除
 	if entry.expiredNano < time.Now().UnixNano() {
 		mc.expiredMu.Lock()
@@ -134,7 +153,6 @@ func (mc *MemCache) Get(key string) (interface{}, bool) {
 
 		return nil, false
 	}
-
 	return entry.value, true
 }
 
@@ -163,7 +181,11 @@ func (mc *MemCache) Flush() bool {
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
 
+	mc.expiredMu.Lock()
+	defer mc.expiredMu.Unlock()
+
 	mc.table = make(map[string]*Entry)
+	mc.expiredTable = make(map[string]*Entry)
 
 	// TODO(monitor1379): 这里返回值的意义是什么，什么时候返回true/false
 	return true
@@ -173,5 +195,5 @@ func (mc *MemCache) Keys() int64 {
 	mc.mu.RLock()
 	defer mc.mu.RUnlock()
 
-	return mc.keyNums
+	return int64(len(mc.table))
 }
