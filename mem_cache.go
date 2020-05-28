@@ -4,7 +4,7 @@ package simplecache
  * @Author: ZhenpengDeng(monitor1379)
  * @Date: 2020-05-27 13:56:36
  * @Last Modified by: ZhenpengDeng(monitor1379)
- * @Last Modified time: 2020-05-27 23:54:04
+ * @Last Modified time: 2020-05-28 12:03:02
  */
 
 import (
@@ -183,6 +183,7 @@ func (mc *MemCache) Get(key string) (interface{}, bool) {
 	if entry.expiredNano > 0 && entry.expiredNano < time.Now().UnixNano() {
 		mc.mu.Lock()
 		delete(mc.table, key)
+		mc.memoryUsage = mc.memoryUsage - int64(len(key)) - entry.valueSize
 		mc.mu.Unlock()
 
 		mc.expiredMu.Lock()
@@ -201,7 +202,13 @@ func (mc *MemCache) Del(key string) bool {
 	entry, ok := mc.table[key]
 	if ok {
 		delete(mc.table, key)
-		mc.memoryUsage -= entry.valueSize
+		mc.memoryUsage = mc.memoryUsage - int64(len(key)) - entry.valueSize
+
+		if entry.expiredNano > 0 {
+			mc.expiredMu.Lock()
+			delete(mc.expiredTable, key)
+			mc.expiredMu.Unlock()
+		}
 	}
 
 	return ok
